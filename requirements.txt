@@ -1,11 +1,11 @@
 streamlit
 pandas
-wbdata
-matplotlib
-seaborn
-statsmodels
 numpy
 plotly
 requests
-datetime
-
+statsmodels
+scikit-learn
+matplotlib
+seaborn
+wbdata
+python-dateutil
