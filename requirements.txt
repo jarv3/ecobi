@@ -6,4 +6,5 @@ seaborn
 statsmodels
 numpy
 plotly
+request
 datetime
