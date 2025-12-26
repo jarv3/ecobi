@@ -1,0 +1,9 @@
+streamlit
+pandas
+wbdata
+matplotlib
+seaborn
+statsmodels
+numpy
+plotly
+datetime

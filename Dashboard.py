@@ -1,0 +1,611 @@
+# ------------------------------
+# CONFIGURACIÓN GENERAL (debe ir al inicio absoluto)
+# ------------------------------
+import numpy as np
+import pandas as pd
+import streamlit as st
+import requests
+import plotly.express as px
+import plotly.graph_objects as go
+import plotly.io as pio
+from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.stattools import adfuller, acf, pacf
+from statsmodels.stats.diagnostic import acorr_ljungbox
+
+st.set_page_config(
+    page_title="Indicadores Macroeconómicos – Banco Mundial",
+    layout="wide",
+    page_icon="📊"
+)
+
+st.title("📊 Indicadores Macroeconómicos (2000–2024)")
+st.markdown("Fuente: Banco Mundial  \
+Proyección: ARIMA  \
+Gráficos interactivos Plotly")
+st.markdown("---")
+
+# ------------------------------
+# INDICADORES
+# ------------------------------
+INDICATORS = {
+    "PIB (US$)": "NY.GDP.MKTP.CD",          # USD actuales
+    "Inflación (%)": "FP.CPI.TOTL.ZG",      # variación anual del IPC (%)
+    "Desempleo (%)": "SL.UEM.TOTL.ZS",      # tasa de desempleo (%)
+    "Balanza Comercial (% PIB)": "NE.RSB.GNFS.ZS",  # % del PIB
+}
+
+# ------------------------------
+# PAÍSES POR CONTINENTE
+# ------------------------------
+CONTINENTS = {
+    "América del Sur": {
+        "Ecuador": "ECU", "Colombia": "COL", "Perú": "PER", "Chile": "CHL",
+        "Argentina": "ARG", "Brasil": "BRA", "Uruguay": "URY", "Paraguay": "PRY",
+        "Bolivia": "BOL", "Venezuela": "VEN",
+    },
+    "América del Norte": {"Estados Unidos": "USA", "Canadá": "CAN", "México": "MEX"},
+    "Europa": {"España": "ESP", "Alemania": "DEU", "Francia": "FRA", "Italia": "ITA", "Reino Unido": "GBR"},
+    "Asia": {"China": "CHN", "Japón": "JPN", "India": "IND", "Corea del Sur": "KOR", "Singapur": "SGP"},
+    "África": {"Sudáfrica": "ZAF", "Nigeria": "NGA", "Egipto": "EGY", "Kenya": "KEN", "Marruecos": "MAR"},
+    "Oceanía": {"Australia": "AUS", "Nueva Zelanda": "NZL"},
+}
+
+# ------------------------------
+# FILTROS (SIDEBAR)
+# ------------------------------
+st.sidebar.header("🎛️ Filtros")
+continent_selected = st.sidebar.selectbox("Selecciona el continente", list(CONTINENTS.keys()))
+country_name = st.sidebar.selectbox("Selecciona el país", list(CONTINENTS[continent_selected].keys()))
+country_code = CONTINENTS[continent_selected][country_name]
+indicator_name = st.sidebar.selectbox("Selecciona el indicador", list(INDICATORS.keys()))
+indicator_code = INDICATORS[indicator_name]
+start_year = st.sidebar.number_input("Año inicial", min_value=1960, max_value=2024, value=2000, step=1)
+end_year = st.sidebar.number_input("Año final", min_value=1960, max_value=2024, value=2024, step=1)
+st.sidebar.caption("Consejo: usa un rango ≥ 10 años para una proyección ARIMA razonable.")
+
+enable_multi = st.sidebar.checkbox("Comparar varios países en la misma gráfica")
+selected_countries = []
+if enable_multi:
+    selected_countries = st.sidebar.multiselect(
+        "Países adicionales (mismo continente)",
+        options=[p for p in CONTINENTS[continent_selected].keys() if p != country_name],
+        default=[]
+    )
+
+# ---- Opciones para el análisis de series ----
+st.sidebar.header("⚙️ Opciones de análisis de series")
+nlags = st.sidebar.number_input("Lags para ACF/PACF y Ljung–Box", min_value=5, max_value=60, value=24, step=1)
+n_test = st.sidebar.number_input("Años para validación fuera de muestra", min_value=1, max_value=20, value=5, step=1)
+adf_on_diff = st.sidebar.checkbox("ADF en primera diferencia", value=True, help="Recomendado para series con tendencia.")
+alpha_ci = 0.05  # nivel para bandas de confianza de ACF/PACF
+
+# ------------------------------
+# API DEL BANCO MUNDIAL (helper + caché)
+# ------------------------------
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_wb_indicator(country_code: str, indicator_code: str, start_year: int, end_year: int) -> pd.DataFrame:
+    """Descarga datos desde la API del Banco Mundial con paginación."""
+    base_url = f"https://api.worldbank.org/v2/country/{country_code}/indicator/{indicator_code}"
+    params = {"date": f"{start_year}:{end_year}", "format": "json", "per_page": 1000}
+    r = requests.get(base_url, params=params, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+    if not isinstance(data, list) or len(data) < 2:
+        return pd.DataFrame(columns=["year", "value"])  # seguridad
+    meta, rows = data[0], data[1]
+    total_pages = int(meta.get('pages', 1))
+    all_rows = list(rows) if isinstance(rows, list) else []
+    for page in range(2, total_pages + 1):
+        params_page = dict(params); params_page["page"] = page
+        rp = requests.get(base_url, params=params_page, timeout=30)
+        rp.raise_for_status()
+        dp = rp.json()
+        if len(dp) >= 2 and isinstance(dp[1], list):
+            all_rows.extend(dp[1])
+    df = pd.DataFrame([{"date": it.get("date"), "value": it.get("value")} for it in all_rows])
+    df["year"] = pd.to_numeric(df["date"], errors="coerce")
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    df = df[(df["year"] >= start_year) & (df["year"] <= end_year)]
+    df = df.dropna(subset=["year", "value"]).sort_values("year").reset_index(drop=True)
+    return df
+
+# ------------------------------
+# OBTENCIÓN DE DATOS
+# ------------------------------
+try:
+    df_main = fetch_wb_indicator(country_code, indicator_code, int(start_year), int(end_year))
+except Exception as e:
+    st.error(f"Error al consultar la API del Banco Mundial: {e}")
+    df_main = pd.DataFrame(columns=["year", "value"])  # evitar NameError
+
+if df_main.empty:
+    st.warning("No se encontraron datos para el filtro seleccionado.")
+    st.stop()
+
+# TÍTULO DE LAS MÉTRICAS (siempre actualizado)
+st.subheader(f"📌 Métricas clave: {indicator_name} – {country_name} ({start_year}–{end_year})")
+
+# Limpieza de datos para evitar errores
+df_main = df_main.drop_duplicates(subset=["year"]).dropna(subset=["year", "value"])
+df_main["year"] = pd.to_numeric(df_main["year"], errors="coerce").astype(int)
+
+if not df_main.empty:
+    current_year = int(df_main["year"].max())
+    current_row = df_main.loc[df_main["year"] == current_year, "value"]
+    current_value = float(current_row.iloc[0]) if not current_row.empty else np.nan
+    mean_value = float(np.nanmean(df_main["value"].values))
+    prev_year = current_year - 1
+    variation_pct = np.nan
+    previous_row = df_main.loc[df_main["year"] == prev_year, "value"]
+    if not previous_row.empty:
+        previous_value = float(previous_row.iloc[0])
+        variation_pct = ((current_value - previous_value) / previous_value) * 100 if previous_value != 0 else np.nan
+
+    projected_value = np.nan
+    variation_vs_projected = np.nan
+    if len(df_main) >= 10:
+        ts_tmp = df_main.set_index("year")["value"].astype(float)
+        try:
+            model_tmp = ARIMA(ts_tmp, order=(1, 1, 1))
+            res_tmp = model_tmp.fit()
+            fc_tmp = res_tmp.forecast(steps=1)
+            projected_value = float(fc_tmp.iloc[0])
+            variation_vs_projected = ((projected_value - current_value) / current_value) * 100 if current_value != 0 else np.nan
+        except Exception as e:
+            st.warning(f"No se pudo calcular la proyección ARIMA de 1 año: {e}")
+
+    if indicator_name == "PIB (US$)":
+        current_value /= 1_000_000
+        mean_value   /= 1_000_000
+        projected_value = projected_value / 1_000_000 if not np.isnan(projected_value) else np.nan
+        unidad = "millones US$"
+    else:
+        unidad = ""  # para indicadores en %
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Valor actual", f"{current_value:,.2f}")
+    c2.metric("Media histórica", f"{mean_value:,.2f}")
+    c3.metric("Variación anual (%)", f"{variation_pct:,.2f}" if not np.isnan(variation_pct) else "N/D")
+    c4.metric("Proyectado (ARIMA)", f"{projected_value:,.2f}" if not np.isnan(projected_value) else "N/D")
+    c5.metric("Variación vs Proyectado (%)", f"{variation_vs_projected:,.2f}" if not np.isnan(variation_vs_projected) else "N/D")
+else:
+    st.warning("No hay datos válidos para calcular las métricas.")
+
+
+# ------------------------------
+# GRÁFICOS INTERACTIVOS (Plotly)
+# ------------------------------
+st.markdown("---")
+
+def make_main_figure(df_plot: pd.DataFrame, title: str, y_label: str, series_name: str):
+    """Figura principal (un solo país), sin rangeslider y eje X categórico."""
+    df_plot = df_plot.copy()
+    df_plot["year_str"] = df_plot["year"].astype(str)
+    fig = px.line(
+        df_plot, x="year_str", y="value",
+        title=title,
+        labels={"year_str": "Año", "value": y_label},
+    )
+    fig.update_traces(line=dict(width=3), mode="lines+markers", name=series_name)
+    fig.update_layout(
+        hovermode="x unified",
+        template="plotly_white",
+        legend_title=None,
+        xaxis=dict(type="category", showgrid=True, 
+            gridcolor="#3A4A5A", 
+            zerolinecolor="#3A4A5A"),
+        yaxis=dict(showgrid=True, gridcolor="#3A4A5A", 
+            zerolinecolor="#3A4A5A"),
+        xaxis_rangeslider=dict(visible=False)
+    )
+    return fig
+
+
+def make_compare_figure(frames: list, title: str, y_label: str):
+    """Figura comparativa multi-país, sin rangeslider y eje X categórico."""
+    df_comp = pd.concat(frames, ignore_index=True)
+    df_comp["year_str"] = df_comp["year"].astype(str)
+    fig = px.line(
+        df_comp,
+        x="year_str", y="value", color="country",
+        title=title,
+        labels={"year_str": "Año", "value": y_label, "country": "País"},
+    )
+    fig.update_traces(line=dict(width=3), mode="lines+markers")
+    fig.update_layout(
+        hovermode="x unified",
+        template="plotly_white",
+        legend_title="País",
+        xaxis=dict(type="category", showgrid=True, 
+            gridcolor="#3A4A5A", 
+            zerolinecolor="#3A4A5A"),
+        yaxis=dict(showgrid=True, 
+            gridcolor="#3A4A5A", 
+            zerolinecolor="#3A4A5A"),
+        xaxis_rangeslider=dict(visible=False)
+    )
+    return fig
+
+# Lógica de visualización
+if enable_multi:
+    if selected_countries:
+        frames = [df_main.assign(country=country_name)]
+        for cname in selected_countries:
+            ccode = CONTINENTS[continent_selected][cname]
+            try:
+                df_cmp = fetch_wb_indicator(ccode, indicator_code, int(start_year), int(end_year))
+                if not df_cmp.empty:
+                    frames.append(df_cmp.assign(country=cname))
+                else:
+                    st.warning(f"No hay datos disponibles para {cname} en el rango {start_year}–{end_year}.")
+            except Exception as e:
+                st.warning(f"No se pudo cargar {indicator_name} para {cname}: {e}")
+        if len(frames) > 1:
+            fig_comp = make_compare_figure(
+                frames,
+                title=f"{indicator_name} – Comparación ({start_year}–{end_year})",
+                y_label=indicator_name
+            )
+            st.plotly_chart(fig_comp, width="stretch", config={"displayModeBar": True, "responsive": True})
+        else:
+            st.info("No hay suficientes países con datos para mostrar la comparación.")
+    else:
+        st.info("Selecciona al menos un país adicional para mostrar la gráfica comparativa.")
+else:
+    fig_main = make_main_figure(
+        df_main,
+        title=f"{indicator_name} – {country_name} ({start_year}–{end_year})",
+        y_label=indicator_name,
+        series_name=country_name
+    )
+    st.plotly_chart(fig_main, width="stretch", config={"displayModeBar": True, "responsive": True})
+
+# ------------------------------
+# PROYECCIÓN ARIMA (interactiva Plotly)
+# ------------------------------
+st.markdown("---")
+st.subheader("🔮 Proyección ARIMA (próximos 5 años)")
+if len(df_main) >= 10:
+    ts = df_main.set_index('year')['value'].astype(float)
+    ts.index = pd.to_datetime(ts.index, format='%Y')
+    try:
+        model = ARIMA(ts, order=(1, 1, 1))
+        res = model.fit()
+        steps = 5
+        fc = res.forecast(steps=steps)
+        # fc_years = list(range(int(ts.index.max()) + 1, int(ts.index.max()) + 1 + steps))
+        fc_years = [(ts.index[-1] + pd.DateOffset(years=i)).year for i in range(1, steps+1)]
+        fig_fc = go.Figure()
+        fig_fc.add_trace(go.Scatter(
+            x=ts.index.astype(str), y=ts.values,
+            mode="lines+markers", name="Histórico",
+            line=dict(color="#0EA5E9", width=3), marker=dict(size=6)
+        ))
+        fig_fc.add_trace(go.Scatter(
+            x=[str(y) for y in fc_years], y=fc.values,
+            mode="lines+markers", name="Proyección",
+            line=dict(color="#EF4444", width=3), marker=dict(size=7)
+        ))
+        fig_fc.update_layout(
+            title=f"ARIMA (1,1,1) – {indicator_name} – {country_name}",
+            xaxis_title="Año", yaxis_title=indicator_name,
+            template="plotly_white", hovermode="x unified",
+            xaxis=dict(showgrid=True, gridcolor="#3A4A5A", zeroline=True, zerolinecolor="#3A4A5A"),
+            yaxis=dict(showgrid=True, gridcolor="#3A4A5A", zeroline=True, zerolinecolor="#3A4A5A")
+            )
+        st.plotly_chart(fig_fc, width="stretch", config={"displayModeBar": True, "responsive": True})
+        st.caption(f"AIC del modelo: **{res.aic:.2f}**")
+    except Exception as e:
+        st.warning(f"No fue posible ajustar ARIMA: {e}")
+else:
+    st.info("Se requieren al menos ~10 observaciones no nulas para una proyección ARIMA razonable.")
+
+# -------------------------------------------------------------
+# ANÁLISIS DE SERIES: ADF, ACF/PACF, ARIMA (1,1,1), RESIDUOS, VALIDACIÓN
+# -------------------------------------------------------------
+st.markdown("---")
+st.subheader("📈 Análisis de la serie temporal")
+
+# Serie base (anual) como float, índice de año
+ts_all = df_main.set_index("year")["value"].astype(float).sort_index().dropna()
+
+# ---------- 1) Prueba de estacionalidad (ADF) ----------
+st.markdown("### 1) Prueba de estacionalidad (ADF)")
+serie_adf = ts_all.diff().dropna() if adf_on_diff else ts_all
+try:
+    adf_stat, adf_p, adf_lags, adf_nobs, adf_crit, adf_icbest = adfuller(serie_adf.values, autolag="AIC")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Estadístico ADF", f"{adf_stat:,.3f}")
+    c2.metric("p-valor", f"{adf_p:,.4f}")
+    c3.metric("Lags usados", f"{adf_lags}")
+    c4.metric("Observaciones", f"{adf_nobs}")
+    st.caption(f"Valores críticos: 1%={adf_crit['1%']:.3f} | 5%={adf_crit['5%']:.3f} | 10%={adf_crit['10%']:.3f}")
+    st.info("Criterio: si el **p-valor < 0.05**, se rechaza la hipótesis nula de raíz unitaria (serie estacionaria).")
+except Exception as e:
+    st.warning(f"No fue posible ejecutar ADF: {e}")
+
+
+# ---------- 2) Gráficos ACF y PACF ----------
+st.markdown("### 2) ACF y PACF")
+
+serie_corr = ts_all.diff().dropna() if adf_on_diff else ts_all
+N = len(serie_corr)
+
+max_pacf_lags = max(1, min(nlags, N // 2))   # PACF: ≤ 50% de la muestra
+max_acf_lags  = max(1, min(nlags, N - 1))    # ACF: capamos por seguridad
+
+if N < 5:
+    st.info("Muy pocos datos para estimar ACF/PACF. Amplía el rango de años o reduce lags.")
+else:
+    try:
+        # Cálculo
+        acf_vals, acf_conf = acf(serie_corr.values, nlags=max_acf_lags, alpha=alpha_ci, fft=True)
+        pacf_vals, pacf_conf = pacf(serie_corr.values, nlags=max_pacf_lags, alpha=alpha_ci, method="ywadjusted")
+
+        # Figura ACF
+        x_lags = list(range(len(acf_vals)))
+        fig_acf = go.Figure()
+        fig_acf.add_trace(go.Bar(x=x_lags, y=acf_vals, name="ACF", marker_color="#0EA5E9"))
+        fig_acf.add_hline(y=0, line=dict(color="#666", width=1))
+        fig_acf.update_layout(
+            title=f"ACF – {'Δ' if adf_on_diff else ''}{indicator_name} ({country_name})",
+            xaxis_title="Lag", yaxis_title="Autocorrelación",
+            template="plotly_white", hovermode="x",
+            yaxis=dict(showgrid=True, gridcolor="#3A4A5A", zeroline=True, zerolinecolor="#3A4A5A")
+            )
+
+        # Figura PACF
+        x_lags_p = list(range(len(pacf_vals)))
+        fig_pacf = go.Figure()
+        fig_pacf.add_trace(go.Bar(x=x_lags_p, y=pacf_vals, name="PACF", marker_color="#EF4444"))
+        fig_pacf.add_hline(y=0, line=dict(color="#666", width=1))
+        fig_pacf.update_layout(
+            title=f"PACF – {'Δ' if adf_on_diff else ''}{indicator_name} ({country_name})",
+            xaxis_title="Lag", yaxis_title="Autocorrelación parcial",
+            template="plotly_white", hovermode="x",
+            yaxis=dict(showgrid=True, gridcolor="#3A4A5A", zeroline=True, zerolinecolor="#3A4A5A")
+        )
+
+        c_acf, c_pacf = st.columns(2)
+        with c_acf:
+            st.plotly_chart(fig_acf, width="stretch", config={"displayModeBar": True, "responsive": True})
+            st.caption("Bandas de confianza calculadas al 95%.")
+        with c_pacf:
+            st.plotly_chart(fig_pacf, width="stretch", config={"displayModeBar": True, "responsive": True})
+            st.caption("Bandas de confianza calculadas al 95%.")
+    except Exception as e:
+        st.info("No fue posible calcular ACF/PACF con los parámetros actuales. Ajusta los lags o revisa los datos.")
+        # Si quieres ver el detalle técnico durante depuración:
+        # st.caption(f"Detalle: {e}")
+
+# ---------- 3) Ajuste ARIMA (1,1,1) + AIC/BIC ----------
+st.markdown("### 3) Ajuste ARIMA (1,1,1) y criterios AIC/BIC")
+if len(ts_all) >= 10:
+    try:
+        model_full = ARIMA(ts_all, order=(1, 1, 1))
+        res_full = model_full.fit()
+        c1, c2 = st.columns(2)
+        c1.metric("AIC", f"{res_full.aic:,.2f}")
+        c2.metric("BIC", f"{res_full.bic:,.2f}")
+        st.caption("Menor AIC/BIC indica mejor trade-off ajuste vs. complejidad. Compara con otros órdenes si lo deseas.")
+    except Exception as e:
+        st.warning(f"No se pudo ajustar ARIMA(1,1,1) sobre toda la serie: {e}")
+else:
+    st.info("Se requieren al menos ~10 observaciones para un ajuste ARIMA razonable.")
+
+
+# ---------- 4) Diagnóstico de residuos y prueba Ljung–Box ----------
+st.markdown("### 4) Diagnóstico de residuos y prueba Ljung–Box")
+
+try:
+    # Verifica que el modelo ARIMA sobre toda la serie se haya ajustado
+    if 'res_full' not in locals():
+        st.info("Primero debe ajustarse el modelo ARIMA para analizar residuos.")
+    else:
+        # Residuos del modelo
+        resid = pd.Series(res_full.resid).dropna()
+        N = len(resid)
+
+        # Regla práctica para evitar errores:
+        # - Ljung–Box requiere suficiente muestra
+        # - Capamos lags a min(nlags elegido, N//2, 40)
+        max_lags = int(max(1, min(nlags, N // 2, 40)))
+
+        if max_lags < 1 or N < 5:
+            st.info("La serie de residuos es muy corta para Ljung–Box. Reduce lags o amplía el rango de años.")
+        else:
+            lag_list = list(range(1, max_lags + 1))
+
+            # IMPORTANTE: usar el índice del DataFrame devuelto (no la columna 'lag')
+            lb = acorr_ljungbox(resid, lags=lag_list, return_df=True)
+            lags_x = lb.index.values              # ← evita KeyError: 'lag'
+
+            # Gráfico de p-valores por lag
+            fig_lb = go.Figure()
+            fig_lb.add_trace(go.Bar(x=lags_x, y=lb["lb_pvalue"], name="p-valor", marker_color="#22C55E"))
+            fig_lb.add_hline(y=0.05, line=dict(color="#EF4444", width=2, dash="dash"),
+                             annotation_text="α=0.05", annotation_position="top right")
+            fig_lb.update_layout(title="Ljung–Box sobre residuos (H0: no autocorrelación)",
+                                 xaxis_title="Lag", yaxis_title="p-valor", template="plotly_white")
+            st.plotly_chart(fig_lb, width="stretch",
+                            config={"displayModeBar": True, "responsive": True})
+
+            # Interpretación
+            if (lb["lb_pvalue"] > 0.05).all():
+                st.success("No se rechaza H0 en todos los lags: los residuos parecen no autocorrelados (adecuado).")
+            else:
+                st.warning("Se rechaza H0 en algunos lags: podrían persistir autocorrelaciones (considera ajustar el orden).")
+
+except Exception as e:
+    st.warning(f"No fue posible ejecutar el diagnóstico de residuos: {e}")
+
+# ---------- 5) Validación fuera de muestra (forecast) ----------
+st.markdown("### 5) Validación fuera de muestra (últimos años como prueba)")
+if len(ts_all) > n_test + 5:
+    try:
+        years_sorted = ts_all.index.astype(int).tolist()
+        # Primer año de prueba es el (max_year - n_test + 1)
+        cutoff_year = int(ts_all.index.max()) - int(n_test) + 1
+        train = ts_all.loc[ts_all.index.astype(int) < cutoff_year]
+        test  = ts_all.loc[ts_all.index.astype(int) >= cutoff_year]
+
+        model_oos = ARIMA(train, order=(1, 1, 1))
+        res_oos = model_oos.fit()
+        fc_oos = res_oos.forecast(steps=len(test))
+
+        mae = float(np.mean(np.abs(test.values - fc_oos.values)))
+        rmse = float(np.sqrt(np.mean((test.values - fc_oos.values)**2)))
+        mape = float(np.mean(np.abs((test.values - fc_oos.values) / np.where(test.values==0, np.nan, test.values))) * 100)
+
+        c_mae, c_rmse, c_mape = st.columns(3)
+        c_mae.metric("MAE", f"{mae:,.2f}")
+        c_rmse.metric("RMSE", f"{rmse:,.2f}")
+        c_mape.metric("MAPE (%)", f"{mape:,.2f}")
+
+        fig_oos = go.Figure()
+        fig_oos.add_trace(go.Scatter(
+            x=train.index.astype(str), y=train.values,
+            mode="lines+markers", name="Entrenamiento", line=dict(color="#0EA5E9", width=3)))
+        fig_oos.add_trace(go.Scatter(
+            x=test.index.astype(str), y=test.values,
+            mode="lines+markers", name="Real (Prueba)", line=dict(color="#F59E0B", width=3)))
+        fig_oos.add_trace(go.Scatter(
+            x=test.index.astype(str), y=fc_oos.values,
+            mode="lines+markers", name="Forecast ARIMA", line=dict(color="#EF4444", width=3)))
+        fig_oos.update_layout(
+            title=f"Validación fuera de muestra – {indicator_name} – {country_name}",
+            xaxis_title="Año", yaxis_title=indicator_name,
+            template="plotly_white", hovermode="x unified",
+            xaxis=dict(showgrid=True, gridcolor="#3A4A5A", zeroline=True, zerolinecolor="#3A4A5A"),
+            yaxis=dict(showgrid=True, gridcolor="#3A4A5A", zeroline=True, zerolinecolor="#3A4A5A")
+        )
+        st.plotly_chart(fig_oos, width="stretch", config={"displayModeBar": True, "responsive": True})
+        st.caption(f"Entrenamiento hasta {int(train.index.max())}, prueba {len(test)} años desde {int(test.index.min())}.")
+    except Exception as e:
+        st.warning(f"No fue posible realizar la validación fuera de muestra: {e}")
+else:
+    st.info("Aumenta el periodo o reduce 'Años para validación' para ejecutar la validación fuera de muestra.")
+
+# ------------------------------
+# HEATMAP DE CORRELACIÓN
+# ------------------------------
+st.markdown("---")
+st.subheader("📊 Correlación entre indicadores (heatmap interactivo)")
+
+default_corr_inds = ["PIB (US$)", "Balanza Comercial (% PIB)", "Inflación (%)", "Desempleo (%)"]
+corr_selection = st.multiselect(
+    "Elige los indicadores a correlacionar",
+    options=list(INDICATORS.keys()),
+    default=default_corr_inds,
+    help="Selecciona 2 o más indicadores para generar la matriz de correlación."
+)
+
+corr_method = st.selectbox(
+    "Método de correlación",
+    options=["pearson", "spearman", "kendall"],
+    index=0,
+    help="Pearson (lineal), Spearman/Kendall (rangos, más robustas)."
+)
+
+transform_choice = st.selectbox(
+    "Transformación previa de las series",
+    options=["Sin transformación", "Crecimiento % vs. año previo", "Estandarización (z-score)"],
+    index=0,
+    help="El crecimiento % revela co‑movimientos; z-score estandariza niveles."
+)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_wb_multi(country_code: str, indicator_map: dict, start_year: int, end_year: int) -> pd.DataFrame:
+    """Descarga múltiples indicadores y los consolida por 'year'."""
+    frames = []
+    for name, code in indicator_map.items():
+        df_i = fetch_wb_indicator(country_code, code, start_year, end_year)
+        if not df_i.empty:
+            df_i = df_i.rename(columns={"value": name})[["year", name]]
+            frames.append(df_i)
+    if not frames:
+        return pd.DataFrame(columns=["year"])
+    df_wide = frames[0]
+    for k in range(1, len(frames)):
+        df_wide = df_wide.merge(frames[k], on="year", how="inner")  # años comunes
+    return df_wide.sort_values("year").reset_index(drop=True)
+
+if len(corr_selection) < 2:
+    st.info("Selecciona al menos **2** indicadores para generar el heatmap de correlación.")
+else:
+    selected_map = {name: INDICATORS[name] for name in corr_selection}
+    df_wide = fetch_wb_multi(country_code, selected_map, int(start_year), int(end_year))
+    if df_wide.empty or df_wide.shape[1] < 3:
+        st.warning("No hay suficientes datos para calcular la correlación en el rango seleccionado.")
+    else:
+        df_corr = df_wide.copy()
+        cols = [c for c in df_corr.columns if c != "year"]
+        if transform_choice == "Crecimiento % vs. año previo":
+            for c in cols:
+                df_corr[c] = df_corr[c].pct_change() * 100.0
+        elif transform_choice == "Estandarización (z-score)":
+            for c in cols:
+                x = df_corr[c].astype(float)
+                mu, sigma = np.nanmean(x), np.nanstd(x)
+                df_corr[c] = (x - mu) / (sigma if sigma not in [0, np.nan] else 1.0)
+        df_corr = df_corr.dropna(subset=cols)
+        if df_corr.shape[0] < 3:
+            st.warning("Se requieren al menos **3 observaciones** tras la transformación.")
+        else:
+            corr_matrix = df_corr[cols].corr(method=corr_method)
+            fig_corr = px.imshow(
+                corr_matrix.values,
+                x=cols, y=cols,
+                color_continuous_scale="RdBu",
+                zmin=-1, zmax=1,
+                text_auto=".2f",
+                aspect="auto",
+                title=f"Matriz de correlación – {country_name} ({start_year}–{end_year}) [{corr_method}]"
+            )
+            fig_corr.update_layout(
+                template="plotly_white", hovermode="closest",
+                coloraxis_colorbar=dict(title="ρ", ticks="outside"),
+                xaxis_title="Indicadores", yaxis_title="Indicadores"
+            )
+            fig_corr.update_coloraxes(cmid=0)
+            st.plotly_chart(fig_corr, width="stretch", config={"displayModeBar": True, "responsive": True})
+
+# ------------------------------
+# DESCARGA DE DATOS (CSV)
+# ------------------------------
+st.markdown("---")
+csv = df_main.to_csv(index=False).encode("utf-8")
+st.download_button("⬇️ Descargar datos (CSV) – Serie seleccionada",
+                   data=csv,
+                   file_name=f"{indicator_name}_{country_name}_{start_year}-{end_year}.csv",
+                   mime="text/csv")
+
+# ------------------------------
+# NOTAS Y AYUDA
+# ------------------------------
+with st.expander("ℹ️ Notas y consideraciones"):
+    st.markdown("""
+**Unidades y definiciones:**
+- *PIB (US$)*: Valor en millones de dólares actuales (no ajustado por inflación).
+- *Inflación (%)*: Variación anual del IPC.
+- *Desempleo (%)*: Porcentaje de la fuerza laboral sin empleo.
+- *Balanza Comercial (% PIB)*: Saldo de bienes y servicios como % del PIB.
+
+**Interpretación de correlación:**
+- **ρ ≈ +1**: Relación positiva fuerte (ambas suben).
+- **ρ ≈ -1**: Relación negativa fuerte (una sube, otra baja).
+- **Cerca de 0**: Relación débil.
+- Prueba **Spearman/Kendall** si sospechas no linealidad u outliers.
+- El **crecimiento %** atenúa efectos de nivel y destaca co‑movimientos.
+
+**ARIMA:**
+- (1,1,1) es base; compara órdenes alternos con **AIC/BIC**.
+- Necesitas ≥ 10 observaciones no nulas para proyecciones razonables.
+
+**Gráficos interactivos:**
+- Usa el **modebar** (cámara para exportar), zoom.
+
+**Fuente:**
+- API oficial del **Banco Mundial** (JSON).
+""")
+
