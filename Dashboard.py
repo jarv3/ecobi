@@ -893,6 +893,7 @@ with st.expander("ℹ️ Notas y consideraciones"):
 - *Inflación (%)*: Variación anual del IPC.
 - *Desempleo (%)*: Porcentaje de la fuerza laboral sin empleo.
 - *Balanza Comercial (% PIB)*: Saldo de bienes y servicios como % del PIB.
+- *Crédito interno al sector privado (% PIB).
 
 **Interpretación de correlación:**
 - **ρ ≈ +1**: Relación positiva fuerte (ambas suben).
@@ -934,4 +935,5 @@ with st.expander("ℹ️ Notas y consideraciones"):
 **Fuente:**
 - API oficial del **Banco Mundial** (JSON).
 """)
+
 
