@@ -24,7 +24,7 @@ st.set_page_config(
     layout="wide",
     page_icon="📊"
 )
-st.title("📊 Sistema econométrico y Business Intelligence para la gestión estratégica del crecimiento económico")
+st.title("📊 Econometría con Business Intelligence para la gestión estratégica del crecimiento económico")
 st.markdown("Fuente: Banco Mundial  \
 Proyección: ARIMA  \
 Gráficos interactivos Plotly")
