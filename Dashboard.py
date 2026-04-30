@@ -24,7 +24,7 @@ st.set_page_config(
     layout="wide",
     page_icon="📊"
 )
-st.title("📊 Sistema Econométrico y Business Intelligence para el Análisis Predictivo y la Gestión Estratégica del Crecimiento Económico")
+st.title("📊 Sistema Econométrico y Business Intelligence para el Análisis Predictivo")
 st.markdown("Fuente: Banco Mundial  \
 Proyección: ARIMA  \
 Gráficos interactivos Plotly")
