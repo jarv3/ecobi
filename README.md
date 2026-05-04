@@ -24,7 +24,7 @@ Brindar una herramienta práctica y didáctica que permita:
 📘 **Manual Profesional y Docente (PDF)**  
 Incluye explicación metodológica, interpretación económica y guía académica.
 
-👉 `docs/Manual_Profesional_Docente_Dashboard_Econometrico_BI.pdf`
+👉 `docs/Manual_Usuario_ECOBI.pdf`
 
 > **Recomendado leer el manual antes de utilizar la aplicación**, especialmente en contextos académicos.
 
