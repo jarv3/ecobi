@@ -1,4 +1,4 @@
-# 📊 Dashboard Econométrico y Business Intelligence
+# 📊 Econometría con Business Intelligence para la gestión estratégica del crecimiento económico
 
 Aplicación interactiva desarrollada en **Python + Streamlit** para el **análisis macroeconómico aplicado**, integrando datos oficiales del **Banco Mundial** con técnicas de **econometría de series temporales**, **modelos multivariantes** y **Machine Learning**.
 
