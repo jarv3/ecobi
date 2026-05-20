@@ -25,9 +25,7 @@ st.set_page_config(
     page_icon="📊"
 )
 st.title("📊 Econometría con Business Intelligence para la gestión estratégica del crecimiento económico")
-st.markdown("Fuente: Banco Mundial  \
-Proyección: ARIMA  \
-Gráficos interactivos Plotly")
+st.markdown("Fuente: Banco Mundial")
 st.markdown("---")
 
 # ------------------------------
@@ -116,6 +114,16 @@ def fetch_wb_indicator(country_code: str, indicator_code: str, start_year: int, 
     return df
 
 # ------------------------------
+# Cambio Año a Perido Fecha
+# ------------------------------
+def prepare_time_series(df):
+    ts = df.set_index("year")["value"].astype(float)
+    ts.index = pd.to_datetime(ts.index, format="%Y")  # ✅ clave
+    ts = ts.sort_index()
+    ts = ts.asfreq("YS")  # frecuencia anual
+    return ts.dropna()
+
+# ------------------------------
 # Obtención de los datos
 # ------------------------------
 try:
@@ -131,45 +139,75 @@ if df_main.empty:
 # Métricas (siempre actualizado)
 st.subheader(f"📌 Métricas clave: {indicator_name} – {country_name} ({start_year}–{end_year})")
 
-# Limpieza de datos para evitar errores
+# Limpieza de datos
 df_main = df_main.drop_duplicates(subset=["year"]).dropna(subset=["year", "value"])
 df_main["year"] = pd.to_numeric(df_main["year"], errors="coerce").astype(int)
+
+# ---------------------------------------------
+# 🔮 Pronóstico ARIMA 1 año (para comparación)
+# ---------------------------------------------
+projected_value = np.nan
+
+if len(df_main) >= 10:
+    ts_tmp = prepare_time_series(df_main)
+    
+    try:
+        model_tmp = ARIMA(ts_tmp, order=(1, 1, 1))
+        res_tmp = model_tmp.fit()
+        fc_tmp = res_tmp.forecast(steps=1)
+        
+        projected_value = float(fc_tmp.iloc[0])
+        
+    except Exception:
+        projected_value = np.nan
+
 if not df_main.empty:
     current_year = int(df_main["year"].max())
+    
+    # Valor actual
     current_row = df_main.loc[df_main["year"] == current_year, "value"]
     current_value = float(current_row.iloc[0]) if not current_row.empty else np.nan
+    
+    # Media histórica
     mean_value = float(np.nanmean(df_main["value"].values))
+    
+    # Variación anual (%)
     prev_year = current_year - 1
     variation_pct = np.nan
+    
     previous_row = df_main.loc[df_main["year"] == prev_year, "value"]
     if not previous_row.empty:
         previous_value = float(previous_row.iloc[0])
         variation_pct = ((current_value - previous_value) / previous_value) * 100 if previous_value != 0 else np.nan
-    projected_value = np.nan
-    variation_vs_projected = np.nan
-    if len(df_main) >= 10:
-        ts_tmp = df_main.set_index("year")["value"].astype(float)
-        try:
-            model_tmp = ARIMA(ts_tmp, order=(1, 1, 1))
-            res_tmp = model_tmp.fit()
-            fc_tmp = res_tmp.forecast(steps=1)
-            projected_value = float(fc_tmp.iloc[0])
-            variation_vs_projected = ((projected_value - current_value) / current_value) * 100 if current_value != 0 else np.nan
-        except Exception as e:
-            st.warning(f"No se pudo calcular la proyección ARIMA de 1 año: {e}")
+
+    # ✅ NUEVA MÉTRICA 1: Desviación estándar (volatilidad)
+    std_value = float(np.nanstd(df_main["value"].values))
+
+    # ✅ NUEVA MÉTRICA 2: CAGR (crecimiento promedio real)
+    first_val = df_main["value"].iloc[0]
+    last_val = df_main["value"].iloc[-1]
+    n_years = len(df_main) - 1
+    
+    cagr = ((last_val / first_val) ** (1 / n_years) - 1) * 100 if first_val != 0 and n_years > 0 else np.nan
+
+    # Ajuste de unidades (PIB en millones)
     if indicator_name == "PIB (US$)":
         current_value /= 1_000_000
         mean_value   /= 1_000_000
-        projected_value = projected_value / 1_000_000 if not np.isnan(projected_value) else np.nan
+        std_value    /= 1_000_000
         unidad = "millones US$"
     else:
-        unidad = ""  # para indicadores en %
+        unidad = ""
+
+    # ✅ Mostrar métricas finales
     c1, c2, c3, c4, c5 = st.columns(5)
+
     c1.metric("Valor actual", f"{current_value:,.2f}")
     c2.metric("Media histórica", f"{mean_value:,.2f}")
     c3.metric("Variación anual (%)", f"{variation_pct:,.2f}" if not np.isnan(variation_pct) else "N/D")
-    c4.metric("Proyectado (ARIMA)", f"{projected_value:,.2f}" if not np.isnan(projected_value) else "N/D")
-    c5.metric("Variación vs Proyectado (%)", f"{variation_vs_projected:,.2f}" if not np.isnan(variation_vs_projected) else "N/D")
+    c4.metric("Desv. estándar", f"{std_value:,.2f}")
+    c5.metric("Crecimiento promedio (%)", f"{cagr:.2f}%" if not np.isnan(cagr) else "N/D")
+
 else:
     st.warning("No hay datos válidos para calcular las métricas.")
 
@@ -258,15 +296,93 @@ else:
     st.plotly_chart(fig_main, width="stretch", config={"displayModeBar": True, "responsive": True})
 
 # ------------------------------
+# HEATMAP de correlación
+# ------------------------------
+st.markdown("---")
+st.subheader("📊 Correlación entre indicadores (heatmap interactivo)")
+default_corr_inds = ["PIB (US$)", "Balanza Comercial (% PIB)", "Inflación (%)", "Desempleo (%)","Crédito interno al sector privado (% PIB)"]
+corr_selection = st.multiselect(
+    "Elige los indicadores a correlacionar",
+    options=list(INDICATORS.keys()),
+    default=default_corr_inds,
+    help="Selecciona 2 o más indicadores para generar la matriz de correlación."
+)
+corr_method = st.selectbox(
+    "Método de correlación",
+    options=["pearson", "spearman", "kendall"],
+    index=0,
+    help="Pearson (lineal), Spearman/Kendall (rangos, más robustas)."
+)
+transform_choice = st.selectbox(
+    "Transformación previa de las series",
+    options=["Sin transformación", "Crecimiento % vs. año previo", "Estandarización (z-score)"],
+    index=0,
+    help="El crecimiento % revela co‑movimientos; z-score estandariza niveles."
+)
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_wb_multi(country_code: str, indicator_map: dict, start_year: int, end_year: int) -> pd.DataFrame:
+    """Descarga múltiples indicadores y los consolida por 'year'."""
+    frames = []
+    for name, code in indicator_map.items():
+        df_i = fetch_wb_indicator(country_code, code, start_year, end_year)
+        if not df_i.empty:
+            df_i = df_i.rename(columns={"value": name})[["year", name]]
+            frames.append(df_i)
+    if not frames:
+        return pd.DataFrame(columns=["year"])
+    df_wide = frames[0]
+    for k in range(1, len(frames)):
+        df_wide = df_wide.merge(frames[k], on="year", how="inner")  # años comunes
+    return df_wide.sort_values("year").reset_index(drop=True)
+if len(corr_selection) < 2:
+    st.info("Selecciona al menos **2** indicadores para generar el heatmap de correlación.")
+else:
+    selected_map = {name: INDICATORS[name] for name in corr_selection}
+    df_wide = fetch_wb_multi(country_code, selected_map, int(start_year), int(end_year))
+    if df_wide.empty or df_wide.shape[1] < 3:
+        st.warning("No hay suficientes datos para calcular la correlación en el rango seleccionado.")
+    else:
+        df_corr = df_wide.copy()
+        cols = [c for c in df_corr.columns if c != "year"]
+        if transform_choice == "Crecimiento % vs. año previo":
+            for c in cols:
+                df_corr[c] = df_corr[c].pct_change() * 100.0
+        elif transform_choice == "Estandarización (z-score)":
+            for c in cols:
+                x = df_corr[c].astype(float)
+                mu, sigma = np.nanmean(x), np.nanstd(x)
+                df_corr[c] = (x - mu) / (sigma if sigma not in [0, np.nan] else 1.0)
+        df_corr = df_corr.dropna(subset=cols)
+        if df_corr.shape[0] < 3:
+            st.warning("Se requieren al menos **3 observaciones** tras la transformación.")
+        else:
+            corr_matrix = df_corr[cols].corr(method=corr_method)
+            fig_corr = px.imshow(
+                corr_matrix.values,
+                x=cols, y=cols,
+                color_continuous_scale="RdBu",
+                zmin=-1, zmax=1,
+                text_auto=".2f",
+                aspect="auto",
+                title=f"Matriz de correlación – {country_name} ({start_year}–{end_year}) [{corr_method}]"
+            )
+            fig_corr.update_layout(
+                template="plotly_white", hovermode="closest",
+                coloraxis_colorbar=dict(title="ρ", ticks="outside"),
+                xaxis_title="Indicadores", yaxis_title="Indicadores"
+            )
+            fig_corr.update_coloraxes(cmid=0)
+            st.plotly_chart(fig_corr, width="stretch", config={"displayModeBar": True, "responsive": True})
+
+# ------------------------------
 # Proyección ARIMA
 # ------------------------------
 st.markdown("---")
 st.subheader("🔮 Proyección ARIMA (próximos 5 años)")
 if len(df_main) >= 10:
-    ts = df_main.set_index('year')['value'].astype(float)
-    ts.index = pd.to_datetime(ts.index, format='%Y')
+    ts = prepare_time_series(df_main)
     try:
-        model = ARIMA(ts, order=(1, 1, 1))
+        model = ARIMA(ts, order=(1, 1, 1)) 
         res = model.fit()
         steps = 5
         fc = res.forecast(steps=steps)
@@ -291,6 +407,16 @@ if len(df_main) >= 10:
             yaxis=dict(showgrid=True, gridcolor="#3A4A5A", zeroline=True, zerolinecolor="#3A4A5A")
             )
         st.plotly_chart(fig_fc, width="stretch", config={"displayModeBar": True, "responsive": True})
+        
+        # =========================================
+        # 📊 MÉTRICA – PRIMER AÑO DE PRONÓSTICO ARIMA
+        # =========================================
+        if len(fc.values) > 0:
+            first_forecast = float(fc.iloc[0])
+            first_year = fc_years[0]
+            units = "US$" if indicator_name == "PIB (US$)" else "%"
+            st.markdown(f"**Pronóstico {first_year} – {indicator_name}**")
+            st.markdown(f"## {first_forecast:,.2f} {units}")
         st.caption(f"AIC del modelo: **{res.aic:.2f}**")
     except Exception as e:
         st.warning(f"No fue posible ajustar ARIMA: {e}")
@@ -304,7 +430,7 @@ st.markdown("---")
 st.subheader("📈 Análisis de la serie temporal")
 
 # Serie base (anual) como float, índice de año
-ts_all = df_main.set_index("year")["value"].astype(float).sort_index().dropna()
+ts_all = prepare_time_series(df_main)
 
 # ---------- 1) Prueba de estacionalidad (ADF) ----------
 st.markdown("### 1) Prueba de estacionalidad (ADF)")
@@ -423,11 +549,11 @@ except Exception as e:
 st.markdown("### 5) Validación fuera de muestra (últimos años como prueba)")
 if len(ts_all) > n_test + 5:
     try:
-        years_sorted = ts_all.index.astype(int).tolist()
+        years = ts_all.index.year
         # Primer año de prueba es el (max_year - n_test + 1)
-        cutoff_year = int(ts_all.index.max()) - int(n_test) + 1
-        train = ts_all.loc[ts_all.index.astype(int) < cutoff_year]
-        test  = ts_all.loc[ts_all.index.astype(int) >= cutoff_year]
+        cutoff_year = years.max() - int(n_test) + 1
+        train = ts_all[years < cutoff_year]
+        test = ts_all[years >= cutoff_year]
         model_oos = ARIMA(train, order=(1, 1, 1))
         res_oos = model_oos.fit()
         fc_oos = res_oos.forecast(steps=len(test))
@@ -456,236 +582,225 @@ if len(ts_all) > n_test + 5:
             yaxis=dict(showgrid=True, gridcolor="#3A4A5A", zeroline=True, zerolinecolor="#3A4A5A")
         )
         st.plotly_chart(fig_oos, width="stretch", config={"displayModeBar": True, "responsive": True})
-        st.caption(f"Entrenamiento hasta {int(train.index.max())}, prueba {len(test)} años desde {int(test.index.min())}.")
+        st.caption(f"Entrenamiento hasta {train.index.max().year}, "f"prueba {len(test)} años desde {test.index.min().year}.")
     except Exception as e:
         st.warning(f"No fue posible realizar la validación fuera de muestra: {e}")
 else:
     st.info("Aumenta el periodo o reduce 'Años para validación' para ejecutar la validación fuera de muestra.")
 
-# ------------------------------
-# HEATMAP de correlación
-# ------------------------------
-st.markdown("---")
-st.subheader("📊 Correlación entre indicadores (heatmap interactivo)")
-default_corr_inds = ["PIB (US$)", "Balanza Comercial (% PIB)", "Inflación (%)", "Desempleo (%)","Crédito interno al sector privado (% PIB)"]
-corr_selection = st.multiselect(
-    "Elige los indicadores a correlacionar",
-    options=list(INDICATORS.keys()),
-    default=default_corr_inds,
-    help="Selecciona 2 o más indicadores para generar la matriz de correlación."
-)
-corr_method = st.selectbox(
-    "Método de correlación",
-    options=["pearson", "spearman", "kendall"],
-    index=0,
-    help="Pearson (lineal), Spearman/Kendall (rangos, más robustas)."
-)
-transform_choice = st.selectbox(
-    "Transformación previa de las series",
-    options=["Sin transformación", "Crecimiento % vs. año previo", "Estandarización (z-score)"],
-    index=0,
-    help="El crecimiento % revela co‑movimientos; z-score estandariza niveles."
-)
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_wb_multi(country_code: str, indicator_map: dict, start_year: int, end_year: int) -> pd.DataFrame:
-    """Descarga múltiples indicadores y los consolida por 'year'."""
-    frames = []
-    for name, code in indicator_map.items():
-        df_i = fetch_wb_indicator(country_code, code, start_year, end_year)
-        if not df_i.empty:
-            df_i = df_i.rename(columns={"value": name})[["year", name]]
-            frames.append(df_i)
-    if not frames:
-        return pd.DataFrame(columns=["year"])
-    df_wide = frames[0]
-    for k in range(1, len(frames)):
-        df_wide = df_wide.merge(frames[k], on="year", how="inner")  # años comunes
-    return df_wide.sort_values("year").reset_index(drop=True)
-if len(corr_selection) < 2:
-    st.info("Selecciona al menos **2** indicadores para generar el heatmap de correlación.")
-else:
-    selected_map = {name: INDICATORS[name] for name in corr_selection}
-    df_wide = fetch_wb_multi(country_code, selected_map, int(start_year), int(end_year))
-    if df_wide.empty or df_wide.shape[1] < 3:
-        st.warning("No hay suficientes datos para calcular la correlación en el rango seleccionado.")
-    else:
-        df_corr = df_wide.copy()
-        cols = [c for c in df_corr.columns if c != "year"]
-        if transform_choice == "Crecimiento % vs. año previo":
-            for c in cols:
-                df_corr[c] = df_corr[c].pct_change() * 100.0
-        elif transform_choice == "Estandarización (z-score)":
-            for c in cols:
-                x = df_corr[c].astype(float)
-                mu, sigma = np.nanmean(x), np.nanstd(x)
-                df_corr[c] = (x - mu) / (sigma if sigma not in [0, np.nan] else 1.0)
-        df_corr = df_corr.dropna(subset=cols)
-        if df_corr.shape[0] < 3:
-            st.warning("Se requieren al menos **3 observaciones** tras la transformación.")
-        else:
-            corr_matrix = df_corr[cols].corr(method=corr_method)
-            fig_corr = px.imshow(
-                corr_matrix.values,
-                x=cols, y=cols,
-                color_continuous_scale="RdBu",
-                zmin=-1, zmax=1,
-                text_auto=".2f",
-                aspect="auto",
-                title=f"Matriz de correlación – {country_name} ({start_year}–{end_year}) [{corr_method}]"
-            )
-            fig_corr.update_layout(
-                template="plotly_white", hovermode="closest",
-                coloraxis_colorbar=dict(title="ρ", ticks="outside"),
-                xaxis_title="Indicadores", yaxis_title="Indicadores"
-            )
-            fig_corr.update_coloraxes(cmid=0)
-            st.plotly_chart(fig_corr, width="stretch", config={"displayModeBar": True, "responsive": True})
-
 # ------------------------------------------------------------
-# MODELO VAR (Vector Autorregresivo)
+# MODELO VAR ROBUSTO AUTOMÁTICO (BI – un indicador)
 # ------------------------------------------------------------
-st.markdown("---")
-st.subheader("🔗 Modelo VAR (Vector Autorregresivo) – sistema de cuatro indicadores")
 
-# Indicadores base (los cuatro solicitados)
-var_indicators = ["PIB (US$)", "Balanza Comercial (% PIB)", "Inflación (%)", "Desempleo (%)", "Crédito interno al sector privado (% PIB)"]
+st.markdown("---")
+st.subheader("🔗 Modelo VAR – Proyección del indicador seleccionado")
+
+# ✅ indicador desde el sidebar
+target_var = indicator_name
+
+# conjunto de variables internas del VAR
+var_indicators = [
+    "PIB (US$)",
+    "Balanza Comercial (% PIB)",
+    "Inflación (%)",
+    "Desempleo (%)",
+    "Crédito interno al sector privado (% PIB)"
+]
+
 var_map = {name: INDICATORS[name] for name in var_indicators}
 
-# Controles en UI
-col_v1, col_v2, col_v3 = st.columns(3)
+# controles
+col_v1, col_v2 = st.columns(2)
+
 with col_v1:
     var_transform = st.selectbox(
-        "Transformación para estacionariedad",
-        options=["Crecimiento % (Δ%)", "Primera diferencia (Δ)", "Log-diferencia (Δlog solo PIB)"],
-        index=0,
-        help="VAR asume series (aprox.) estacionarias. Δ% suele funcionar bien para datos anuales."
+        "Transformación interna del modelo VAR",
+        options=["Crecimiento % (Δ%)", "Primera diferencia (Δ)"],
+        index=0
     )
+
 with col_v2:
-    var_max_lags = st.number_input(
-        "Máximo número de rezagos para seleccionar (AIC/BIC)",
-        min_value=1, max_value=5, value=2, step=1,
-        help="Para datos anuales suele bastar 1–2 rezagos."
-    )
-with col_v3:
     var_steps = st.number_input(
         "Horizonte de pronóstico (años)",
-        min_value=1, max_value=10, value=5, step=1
+        min_value=1, max_value=10, value=5
     )
 
-# Descarga y preparación (reutiliza tu helper)
-df_var_wide = fetch_wb_multi(country_code, var_map, int(start_year), int(end_year))  # ya lo tienes creado
-if df_var_wide.empty or df_var_wide.shape[1] < 5:  # 1 columna es 'year' + 4 indicadores
-    st.warning("No hay suficientes datos para estimar el VAR con los cuatro indicadores en el rango seleccionado.")
+# ---------------------------------------------
+# DATA
+# ---------------------------------------------
+df_var_wide = fetch_wb_multi(country_code, var_map, int(start_year), int(end_year))
+
+if df_var_wide.empty or df_var_wide.shape[1] < 5:
+    st.warning("No hay suficientes datos para el modelo VAR.")
 else:
+
     df_var = df_var_wide.copy()
     cols = [c for c in df_var.columns if c != "year"]
-    # Transformaciones para (aprox.) estacionariedad
+
+    # ---------------------------------------------
+    # TRANSFORMACIÓN INTERNA
+    # ---------------------------------------------
     if var_transform == "Crecimiento % (Δ%)":
         for c in cols:
-            df_var[c] = df_var[c].pct_change() * 100.0
-        y_label_suffix = " (Δ%)"
-    elif var_transform == "Primera diferencia (Δ)":
+            df_var[c] = df_var[c].pct_change() * 100
+    else:
         for c in cols:
             df_var[c] = df_var[c].diff()
-        y_label_suffix = " (Δ)"
-    else:  # Log-diferencia solo al PIB; resto en primera diferencia
-        # Log-diff del PIB (≈ crecimiento %)
-        df_var["PIB (US$)"] = np.log(df_var["PIB (US$)"]).diff() * 100.0
-        for c in cols:
-            if c != "PIB (US$)":
-                df_var[c] = df_var[c].diff()
-        y_label_suffix = " (Δ / Δlog)"
 
-    # Limpieza
-    df_var = df_var.dropna(subset=cols).sort_values("year").reset_index(drop=True)
+    df_var = df_var.dropna()
 
-    # Reglas mínimas de muestra para VAR
-    if df_var.shape[0] < (var_max_lags + 5):
-        st.info("Muy pocas observaciones tras la transformación. Amplía el período o reduce el número máximo de rezagos.")
-    else:
-        try:
-            # Selección automática de rezagos por criterios de información
-            model = VAR(df_var[cols])
-            sel = model.select_order(maxlags=int(var_max_lags))
-            # Usamos AIC como criterio principal; si no está, caemos a BIC/HQIC/FPE
-            selected_lag = (
-                sel.aic or sel.bic or sel.hqic or sel.fpe or 1
-            )
-            # Ajuste del VAR con el lag seleccionado
-            results = model.fit(selected_lag)
-            # Métricas y estabilidad
-            c_aic, c_bic, c_stb = st.columns(3)
-            with c_aic:
-                st.metric("Lag (AIC)", f"{sel.aic if sel.aic is not None else 'N/D'}")
-            with c_bic:
-                st.metric("Lag (BIC)", f"{sel.bic if sel.bic is not None else 'N/D'}")
-            with c_stb:
-                st.metric("Estabilidad (roots < 1)", "Sí" if results.is_stable() else "No")
-            # Pronóstico multivariado
-            fc = results.forecast(y=results.endog[-selected_lag:], steps=int(var_steps))
-            fc_df = pd.DataFrame(fc, columns=cols)
-            # Años futuros (anuales)
-            last_year = int(df_var["year"].max())
-            future_years = list(range(last_year + 1, last_year + 1 + int(var_steps)))
-            fc_df.insert(0, "year", future_years)
-            # Figura: histórico transformado + pronóstico por variable
-            fig_var = go.Figure()
-            for c in cols:
-                # Histórico
-                fig_var.add_trace(go.Scatter(
-                    x=df_var["year"].astype(str), y=df_var[c],
-                    mode="lines+markers", name=f"{c} histórico{y_label_suffix}",
-                    line=dict(width=3), marker=dict(size=6)
-                ))
-                # Pronóstico
-                fig_var.add_trace(go.Scatter(
-                    x=fc_df["year"].astype(str), y=fc_df[c],
-                    mode="lines+markers", name=f"{c} pronóstico{y_label_suffix}",
-                    line=dict(width=3, dash="dash"), marker=dict(size=7)
-                ))
-            fig_var.update_layout(
-                title=f"VAR({selected_lag}) – {country_name} – {start_year}–{end_year}",
-                xaxis_title="Año",
-                yaxis_title=f"Indicadores transformados{y_label_suffix}",
-                template="plotly_white",
-                hovermode="x unified",
-                legend_title="Serie",
-                xaxis=dict(showgrid=True, gridcolor="#3A4A5A", zeroline=True, zerolinecolor="#3A4A5A"),
-                yaxis=dict(showgrid=True, gridcolor="#3A4A5A", zeroline=True, zerolinecolor="#3A4A5A")
-            )
-            st.plotly_chart(fig_var, width="stretch", config={"displayModeBar": True, "responsive": True})
-            # Tabla con el pronóstico
-            st.caption("Pronóstico VAR en unidades transformadas (según opción elegida).")
-            st.dataframe(fc_df, width="stretch")
-            # Opcional: Causalidad de Granger (parejas)
-            if st.checkbox("Calcular pruebas de causalidad de Granger (parejas)", help="Usa las series transformadas; interpreta con cautela."):
-                rows = []
-                for x in cols:
-                    for y in cols:
-                        if x == y:
-                            continue
-                        try:
-                            tests = grangercausalitytests(
-                                df_var[[y, x]].dropna(), maxlag=int(selected_lag), verbose=False
-                            )
-                            pvals = [tests[k][0]['ssr_chi2test'][1] for k in range(1, int(selected_lag)+1)]
-                            pv_min = float(np.nanmin(pvals))
-                            rows.append({
-                                "Hipótesis": f"{x} → {y}",
-                                "p-valor mínimo": pv_min,
-                                "Conclusión (α=0.05)": "Rechaza H0 (causalidad)" if pv_min < 0.05 else "No rechaza H0"
-                            })
-                        except Exception as e:
-                            rows.append({"Hipótesis": f"{x} → {y}", "p-valor mínimo": np.nan, "Conclusión (α=0.05)": f"Error: {e}"})
-                st.dataframe(pd.DataFrame(rows), width="stretch")
-        except Exception as e:
-            st.warning(f"No fue posible ajustar el VAR: {e}")
+    try:
+        # ---------------------------------------------
+        # VAR ROBUSTO
+        # ---------------------------------------------
+        model_var = VAR(df_var[cols])
+
+        # ✅ CONTROL AUTOMÁTICO DE LAGS
+        max_lags_safe = min(2, len(df_var) // (len(cols) * 2))
+
+        max_lags_safe = max(1, max_lags_safe)
+
+        lag_selection = model_var.select_order(maxlags=max_lags_safe)
+
+        lag_selected = lag_selection.aic
+
+        if lag_selected is None or lag_selected < 1:
+            lag_selected = 1
+
+        lag_selected = int(lag_selected)
+
+        model_fitted = model_var.fit(lag_selected)
+      
+        # ---------------------------------------------
+        # 📊 DIAGNÓSTICOS AVANZADOS VAR
+        # ---------------------------------------------
+        st.markdown("### 🔬 Diagnóstico estadístico VAR")
+
+        # ✅ 1. Estabilidad (ya la tienes)
+        roots = model_fitted.roots
+        is_stable = np.all(np.abs(roots) < 1)
+
+        # ✅ 2. Autocorrelación (Ljung–Box)
+        from statsmodels.stats.diagnostic import acorr_ljungbox
+
+        residuals = model_fitted.resid
+        # ✅ 2. Autocorrelación (Ljung–Box) CORRECTO para VAR
+        lb_results = []
+        for col in residuals.columns:
+            lb = acorr_ljungbox(residuals[col], lags=[lag_selected], return_df=True)
+            pvalue = lb["lb_pvalue"].iloc[0]
+            lb_results.append(pvalue)
+        no_autocorr = all(p > 0.05 for p in lb_results)
+
+        # ✅ 3. Normalidad (Jarque–Bera)
+        from scipy.stats import jarque_bera
+
+        jb_results = []
+        for col in residuals.columns:
+            stat, pval = jarque_bera(residuals[col])
+            jb_results.append(pval)
+
+        normal_resid = all(p > 0.05 for p in jb_results)
+
+        # ---------------------------------------------
+        # 📊 Mostrar resultados
+        # ---------------------------------------------
+        c1, c2, c3, c4 = st.columns(4)
+
+        c1.metric("Lag seleccionado (AIC)", lag_selected)
+        c2.metric("Estabilidad VAR", "✅ Sí" if is_stable else "❌ No")
+        c3.metric("Sin Autocorrelación", "✅ Sí" if no_autocorr else "❌ No")
+        c4.metric("Normalidad residuos", "✅ Sí" if normal_resid else "❌ No")
+
+        # ---------------------------------------------
+        # FORECAST
+        # ---------------------------------------------
+        forecast = model_fitted.forecast(
+            df_var[cols].values[-lag_selected:],
+            steps=int(var_steps)
+        )
+
+        # ---------------------------------------------
+        # RECONSTRUCCIÓN EN NIVELES
+        # ---------------------------------------------
+        last_values = df_var_wide.iloc[-1].copy()
+        last_year = int(df_var_wide["year"].max())
+
+        future_years = [last_year + i + 1 for i in range(int(var_steps))]
+        future_values = []
+
+        last_val = last_values[target_var]
+
+        for i in range(len(future_years)):
+            pred = forecast[i, cols.index(target_var)]
+
+            if var_transform == "Crecimiento % (Δ%)":
+                last_val = last_val * (1 + pred / 100.0)
+            else:
+                last_val = last_val + pred
+
+            future_values.append(last_val)
+
+        # ---------------------------------------------
+        # GRÁFICO (ESTILO ARIMA / ML)
+        # ---------------------------------------------
+        st.markdown(f"### 📈 Proyección VAR – {target_var}")
+
+        fig_var = go.Figure()
+
+        # histórico
+        fig_var.add_trace(go.Scatter(
+            x=df_var_wide["year"].astype(str),
+            y=df_var_wide[target_var],
+            mode="lines+markers",
+            name="Histórico",
+            line=dict(color="#0EA5E9", width=3)
+        ))
+
+        # forecast
+        fig_var.add_trace(go.Scatter(
+            x=[str(y) for y in future_years],
+            y=future_values,
+            mode="lines+markers",
+            name="Pronóstico VAR",
+            line=dict(color="#EF4444", width=3, dash="dash")
+        ))
+
+        # etiquetas
+        if target_var == "PIB (US$)":
+            y_label = "PIB (US$)"
+        else:
+            y_label = target_var
+
+        fig_var.update_layout(
+            title=f"VAR – {target_var} ({country_name})",
+            xaxis_title="Año",
+            yaxis_title=y_label,
+            template="plotly_white",
+            hovermode="x unified"
+        )
+
+        st.plotly_chart(fig_var, width="stretch")
+        # =========================================
+        # 📊 MÉTRICA – PRIMER AÑO DE PRONÓSTICO
+        # =========================================
+        if len(future_values) > 0:
+            first_forecast = future_values[0]
+            first_year = future_years[0]
+        # unidad
+        units = "US$" if target_var == "PIB (US$)" else "%"
+        st.markdown(f"**Pronóstico {first_year} – {target_var}**")
+        st.markdown(f"## {first_forecast:,.2f} {units}")
+
+    except Exception as e:
+        st.warning(f"No fue posible ejecutar el modelo VAR: {e}")
+
 
 # ------------------------------------------------------------
 # MACHINE LEARNING (generalizado): Pronóstico 2025 para variable objetivo seleccionada
 # ------------------------------------------------------------
 st.markdown("---")
-st.subheader("🧠 Machine Learning – Pronóstico para variable objetivo (PIB, Inflación, Desempleo, Balanza)")
+st.subheader("🧠 Machine Learning – Pronóstico para variable objetivo (PIB, Inflación, Desempleo, Balanza, Crédito)")
 
 # 1) Datos base: las 4 series y normalización de 'year'
 ml_indicators = ["PIB (US$)", "Balanza Comercial (% PIB)", "Inflación (%)", "Desempleo (%)","Crédito interno al sector privado (% PIB)"]
@@ -697,34 +812,19 @@ else:
     # Garantiza que 'year' sea numérico (soporta NaN)
     df_wide["year"] = pd.to_numeric(df_wide["year"], errors="coerce").astype("Int64")
     # 2) Controles de usuario
-    col_sel1, col_sel2, col_sel3, col_sel4 = st.columns(4)
+    col_sel1, col_sel2, col_sel3 = st.columns(3)
     with col_sel1:
-        target_var = st.selectbox("Variable objetivo", options=ml_indicators, index=0)
+        target_var = indicator_name
+        predictors = [x for x in ml_indicators if x != target_var]
+        st.success(f"Variable objetivo: {target_var}")
     with col_sel2:
-        # Transformaciones del objetivo (dependen del tipo)
-        if target_var == "PIB (US$)":
-            target_transform = st.selectbox(
-                "Transformación del objetivo",
-                options=["Crecimiento % (Δ%)", "Primera diferencia (Δ)", "Nivel (US$)"],
-                index=0,
-                help="Δ% y Δ ayudan a estacionariedad; 'Nivel' modela directamente el PIB."
-            )
-        else:
-            target_transform = st.selectbox(
-                "Transformación del objetivo",
-                options=["Nivel (%)", "Primera diferencia (Δ)", "Crecimiento % (Δ%)"],
-                index=0,
-                help="Para variables en %, el 'Nivel' anual suele ser utilizable; si notas tendencia, usa Δ o Δ%."
-            )
-
-    with col_sel3:
         feat_transform = st.selectbox(
             "Transformación de predictores",
             options=["Niveles", "Primera diferencia (Δ)", "Crecimiento % (Δ%)"],
             index=0,
             help="Se aplica a predictores (otras variables) y al lag del objetivo."
         )
-    with col_sel4:
+    with col_sel3:
         lag_k = st.number_input("Rezagos de predictores (k)", min_value=1, max_value=3, value=1, step=1)
     col_m1, col_m2 = st.columns(2)
     with col_m1:
@@ -741,24 +841,12 @@ else:
     cols_all = [c for c in df_ml.columns if c != "year"]
     other_vars = [v for v in ml_indicators if v != target_var]
     # --- Objetivo (target) ---
-    if target_transform.startswith("Nivel"):
-        df_ml["target"] = df_ml[target_var].astype(float)
-        target_units = f"Nivel de {target_var}"
-    elif "Δ%)" in target_transform:  # Crecimiento %
-        df_ml["target"] = df_ml[target_var].pct_change() * 100.0
-        target_units = f"Crecimiento % de {target_var}"
-    else:  # Primera diferencia
-        df_ml["target"] = df_ml[target_var].diff()
-        target_units = f"Primera diferencia de {target_var}"
+    df_ml["target"] = df_ml[target_var].astype(float)
+    target_units = f"Nivel de {target_var}"
     # --- Predictores (transformados SIN shift aún) ---
     df_feat = pd.DataFrame({"year": df_ml["year"]})
     # Autoregresivo del objetivo (lag del propio objetivo como predictor)
-    if target_transform.startswith("Nivel"):
-        df_feat["Y_X"] = df_ml[target_var].astype(float)
-    elif "Δ%)" in target_transform:
-        df_feat["Y_X"] = df_ml[target_var].pct_change() * 100.0
-    else:
-        df_feat["Y_X"] = df_ml[target_var].diff()
+    df_feat["Y_X"] = df_ml[target_var].astype(float)
     # Otras variables como predictores
     for c in other_vars:
         if feat_transform == "Niveles":
@@ -835,6 +923,46 @@ else:
                 xaxis_title="Año", yaxis_title=target_units,
                 template="plotly_white", hovermode="x unified"
             )
+            
+            # =========================================
+            # 🔮 FORECAST (PEGAR AQUÍ ✅)
+            # =========================================
+            future_years = list(range(last_year + 1, last_year + 6))
+            future_preds = []
+            current_features = df_feat.copy()   
+            future_preds = []
+            last_known = df_feat[df_feat["year"] == last_year].copy()
+
+            for i, year in enumerate(future_years):
+                if i == 0:
+                    # usa último dato real (2024)
+                    X_future = last_known[X_cols].values
+                else:
+                    # usa predicción anterior (recursivo)
+                    last_known[X_cols[0]] = future_preds[-1]
+                    X_future = last_known[X_cols].values
+                y_future = float(model.predict(X_future)[0])
+                future_preds.append(y_future)
+
+            # ✅ reconstrucción en niveles
+            future_levels = []
+            last_level = float(df_wide.loc[df_wide["year"] == last_year, target_var].iloc[0])
+
+            for pred in future_preds:
+    
+                future_levels = future_preds
+                
+
+            # ✅ AGREGAR AL MISMO GRÁFICO
+            fig_ml_ts.add_trace(go.Scatter(
+                x=[str(y) for y in future_years[:len(future_levels)]],
+                y=future_levels,
+                mode="lines+markers",
+                name="Pronóstico ML (2025–2030)",
+                line=dict(color="#22C55E", width=3, dash="dash")
+                ))
+
+            # ✅ AHORA SÍ mostrar gráfico
             st.plotly_chart(fig_ml_ts, width="stretch", config={"displayModeBar": True, "responsive": True})
             # 8) Pronóstico 2025 en nivel (US$ o %), respetando el rezago k
             #    Para 2025 (future_year), usamos predictores del año ref_year = future_year - k.
@@ -857,22 +985,75 @@ else:
                     st.info("No se encontró el nivel del último año para reconstrucción. Revisa el rango temporal.")
                 else:
                     last_level = float(last_level_series.iloc[0])
-                    if target_transform.startswith("Nivel"):
-                        level_2025 = y_future_pred
-                        units = "US$" if target_var == "PIB (US$)" else "%"
-                        st.metric(f"Pronóstico 2025 – {target_var}", f"{level_2025:,.2f} {units}")
-                    elif "Δ%)" in target_transform:
-                        level_2025 = last_level * (1.0 + y_future_pred/100.0)
-                        units = "US$" if target_var == "PIB (US$)" else "%"
-                        st.metric(f"Pronóstico 2025 – {target_var}", f"{level_2025:,.2f} {units}", f"{y_future_pred:,.2f}% vs {last_year}")
-                    else:  # Primera diferencia (Δ)
-                        level_2025 = last_level + y_future_pred
-                        units = "US$" if target_var == "PIB (US$)" else "%"
-                        delta_sign = "▲" if y_future_pred >= 0 else "▼"
-                        st.metric(f"Pronóstico 2025 – {target_var}", f"{level_2025:,.2f} {units}", f"{delta_sign} {abs(y_future_pred):,.2f}")
+                    level_2025 = y_future_pred
+                units = "US$" if target_var == "PIB (US$)" else "%"
+                st.metric(f"Pronóstico 2025 – {target_var}",f"{level_2025:,.2f} {units}")            
         except Exception as e:
             st.warning(f"No fue posible entrenar/evaluar el modelo ML: {e}")
 
+# =========================================================
+# 📊 COMPARACIÓN DE MODELOS (ARIMA vs ML vs VAR)
+# =========================================================
+
+st.markdown("---")
+st.subheader("📊 Comparación de modelos de predicción")
+
+# ✅ asegurarse que estas variables existen
+# ARIMA
+arima_forecast = projected_value if 'projected_value' in locals() else np.nan
+
+# ML (ajusta si tu variable se llama distinto)
+ml_forecast = level_2025 if 'level_2025' in locals() else np.nan
+
+# VAR
+var_forecast = first_forecast if 'first_forecast' in locals() else np.nan
+
+# Último valor real
+last_value = current_value if 'current_value' in locals() else np.nan
+
+# Unidad
+units = "US$" if indicator_name == "PIB (US$)" else "%"
+
+# Variaciones (evitar errores)
+def safe_delta(forecast, last):
+    if pd.isna(forecast) or pd.isna(last) or last == 0:
+        return np.nan
+    return ((forecast - last) / last) * 100
+
+delta_arima = safe_delta(arima_forecast, last_value)
+delta_ml = safe_delta(ml_forecast, last_value)
+delta_var = safe_delta(var_forecast, last_value)
+
+# Columnas
+col1, col2, col3 = st.columns(3)
+
+# ARIMA
+with col1:
+    st.markdown("### 🔵 ARIMA")
+    st.metric(
+        "Pronóstico",
+        f"{arima_forecast:,.2f} {units}" if not np.isnan(arima_forecast) else "N/D",
+        f"{delta_arima:.2f}%" if not np.isnan(delta_arima) else ""
+    )
+
+# ML
+with col2:
+    st.markdown("### 🟢 VAR")
+    st.metric(
+        "Pronóstico",
+        f"{var_forecast:,.2f} {units}" if not np.isnan(var_forecast) else "N/D",
+        f"{delta_var:.2f}%" if not np.isnan(delta_var) else ""
+    )
+
+# VAR
+with col3:
+    st.markdown("### 🔴 Machine Learning")
+    st.metric(
+        "Pronóstico",
+        f"{ml_forecast:,.2f} {units}" if not np.isnan(ml_forecast) else "N/D",
+        f"{delta_ml:.2f}%" if not np.isnan(delta_ml) else ""
+    )
+    
 # ------------------------------
 # DESCARGA DE DATOS (CSV)
 # ------------------------------
@@ -935,6 +1116,3 @@ with st.expander("ℹ️ Notas y consideraciones"):
 **Fuente:**
 - API oficial del **Banco Mundial** (JSON).
 """)
-
-
-
