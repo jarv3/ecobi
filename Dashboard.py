@@ -8,6 +8,7 @@ import requests
 import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
+from datetime import datetime
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.api import VAR
 from statsmodels.tsa.stattools import adfuller, acf, pacf, grangercausalitytests
@@ -19,6 +20,10 @@ from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.inspection import permutation_importance
+CURRENT_YEAR = datetime.now().year
+LAST_AVAILABLE_YEAR = CURRENT_YEAR - 1
+FORECAST_YEAR = CURRENT_YEAR
+
 st.set_page_config(
     page_title="Indicadores Macroeconómicos – Banco Mundial",
     layout="wide",
@@ -64,8 +69,8 @@ country_name = st.sidebar.selectbox("Selecciona el país", list(CONTINENTS[conti
 country_code = CONTINENTS[continent_selected][country_name]
 indicator_name = st.sidebar.selectbox("Selecciona el indicador", list(INDICATORS.keys()))
 indicator_code = INDICATORS[indicator_name]
-start_year = st.sidebar.number_input("Año inicial", min_value=1960, max_value=2024, value=2000, step=1)
-end_year = st.sidebar.number_input("Año final", min_value=1960, max_value=2024, value=2024, step=1)
+start_year = st.sidebar.number_input("Año inicial", min_value=1960, max_value=LAST_AVAILABLE_YEAR, value=2000, step=1)
+end_year = st.sidebar.number_input("Año final", min_value=1960, max_value=LAST_AVAILABLE_YEAR, value=LAST_AVAILABLE_YEAR, step=1)
 st.sidebar.caption("Consejo: usa un rango ≥ 10 años para una proyección ARIMA razonable.")
 enable_multi = st.sidebar.checkbox("Comparar varios países en la misma gráfica")
 selected_countries = []
@@ -117,11 +122,28 @@ def fetch_wb_indicator(country_code: str, indicator_code: str, start_year: int, 
 # Cambio Año a Perido Fecha
 # ------------------------------
 def prepare_time_series(df):
-    ts = df.set_index("year")["value"].astype(float)
-    ts.index = pd.to_datetime(ts.index, format="%Y")  # ✅ clave
-    ts = ts.sort_index()
-    ts = ts.asfreq("YS")  # frecuencia anual
-    return ts.dropna()
+
+    ts = (
+        df[["year", "value"]]
+        .copy()
+        .dropna()
+        .drop_duplicates(subset=["year"])
+        .sort_values("year")
+    )
+
+    ts["date"] = pd.to_datetime(
+        ts["year"].astype(str) + "-01-01"
+    )
+
+    ts = ts.set_index("date")["value"]
+
+    ts = ts.asfreq("YS")
+
+    ts = ts.interpolate(method="linear")
+
+    ts.index.freq = pd.offsets.YearBegin()
+
+    return ts.astype(float)
 
 # ------------------------------
 # Obtención de los datos
@@ -386,16 +408,15 @@ if len(df_main) >= 10:
         res = model.fit()
         steps = 5
         fc = res.forecast(steps=steps)
-        # fc_years = list(range(int(ts.index.max()) + 1, int(ts.index.max()) + 1 + steps))
-        fc_years = [(ts.index[-1] + pd.DateOffset(years=i)).year for i in range(1, steps+1)]
+        fc_dates = pd.date_range(start=ts.index[-1] + pd.DateOffset(years=1),periods=steps,freq="YS")
         fig_fc = go.Figure()
         fig_fc.add_trace(go.Scatter(
-            x=ts.index.astype(str), y=ts.values,
+            x=ts.index, y=ts.values,
             mode="lines+markers", name="Histórico",
             line=dict(color="#0EA5E9", width=3), marker=dict(size=6)
         ))
         fig_fc.add_trace(go.Scatter(
-            x=[str(y) for y in fc_years], y=fc.values,
+            x=fc_dates, y=fc.values,
             mode="lines+markers", name="Proyección",
             line=dict(color="#EF4444", width=3), marker=dict(size=7)
         ))
@@ -413,7 +434,7 @@ if len(df_main) >= 10:
         # =========================================
         if len(fc.values) > 0:
             first_forecast = float(fc.iloc[0])
-            first_year = fc_years[0]
+            first_year = fc_dates[0].year
             units = "US$" if indicator_name == "PIB (US$)" else "%"
             st.markdown(f"**Pronóstico {first_year} – {indicator_name}**")
             st.markdown(f"## {first_forecast:,.2f} {units}")
@@ -552,8 +573,14 @@ if len(ts_all) > n_test + 5:
         years = ts_all.index.year
         # Primer año de prueba es el (max_year - n_test + 1)
         cutoff_year = years.max() - int(n_test) + 1
-        train = ts_all[years < cutoff_year]
-        test = ts_all[years >= cutoff_year]
+        train = ts_all.loc[ts_all.index.year < cutoff_year].copy()
+        test = ts_all.loc[ts_all.index.year >= cutoff_year].copy()
+        train = train.asfreq("YS")
+        test = test.asfreq("YS")
+        train.index.freq = pd.offsets.YearBegin()
+        test.index.freq = pd.offsets.YearBegin()
+        assert isinstance(train.index, pd.DatetimeIndex)
+        assert train.index.freq is not None
         model_oos = ARIMA(train, order=(1, 1, 1))
         res_oos = model_oos.fit()
         fc_oos = res_oos.forecast(steps=len(test))
@@ -629,7 +656,10 @@ with col_v2:
 # DATA
 # ---------------------------------------------
 df_var_wide = fetch_wb_multi(country_code, var_map, int(start_year), int(end_year))
-
+df_var_wide["date"] = pd.to_datetime(df_var_wide["year"].astype(str) + "-01-01")
+df_var_wide = (df_var_wide.set_index("date").sort_index())
+df_var_wide = df_var_wide.asfreq("YS")
+df_var_wide.index.freq = pd.offsets.YearBegin()
 if df_var_wide.empty or df_var_wide.shape[1] < 5:
     st.warning("No hay suficientes datos para el modelo VAR.")
 else:
@@ -797,7 +827,7 @@ else:
 
 
 # ------------------------------------------------------------
-# MACHINE LEARNING (generalizado): Pronóstico 2025 para variable objetivo seleccionada
+# MACHINE LEARNING (generalizado): Pronóstico dinámico para variable objetivo seleccionada
 # ------------------------------------------------------------
 st.markdown("---")
 st.subheader("🧠 Machine Learning – Pronóstico para variable objetivo (PIB, Inflación, Desempleo, Balanza, Crédito)")
