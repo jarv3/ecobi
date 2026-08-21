@@ -89,6 +89,16 @@ adf_on_diff = st.sidebar.checkbox("ADF en primera diferencia", value=True, help=
 alpha_ci = 0.05  # nivel para bandas de confianza de ACF/PACF
 
 # ------------------------------
+# MANUAL DE USUARIO
+# ------------------------------
+st.sidebar.divider()
+st.sidebar.subheader("📚 Ayuda")
+st.sidebar.link_button(
+    "📘 Manual de Usuario ECOBI",
+    "https://raw.githubusercontent.com/jarv3/ecobi/main/docs/Manual%20de%20Usuario%20ECOBI.pdf"
+)
+
+# ------------------------------
 # API del banco mundial
 # ------------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
