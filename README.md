@@ -24,7 +24,7 @@ Brindar una herramienta práctica y didáctica que permita:
 📘 **Manual Profesional y Docente (PDF)**  
 Incluye explicación metodológica, interpretación económica y guía académica.
 
-👉 [Abrir Manual de Usuario ECOBI (PDF)](docs/%20Manual%20de%20Usuario%20ECOBI.pdf)
+👉 [Abrir Manual de Usuario ECOBI (PDF)](docs/Manual%20de%20Usuario%20ECOBI.pdf)
 
 > **Recomendado leer el manual antes de utilizar la aplicación**, especialmente en contextos académicos.
 
