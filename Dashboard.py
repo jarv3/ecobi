@@ -463,7 +463,7 @@ st.subheader("📈 Análisis de la serie temporal")
 # Serie base (anual) como float, índice de año
 ts_all = prepare_time_series(df_main)
 
-# ---------- 1) Prueba de estacionalidad (ADF) ----------
+# ---------- 1) Prueba de estacionariedad (ADF) ----------
 st.markdown("### 1) Prueba de estacionariedad (ADF)")
 serie_adf = ts_all.diff().dropna() if adf_on_diff else ts_all
 try:
