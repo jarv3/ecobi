@@ -464,7 +464,7 @@ st.subheader("📈 Análisis de la serie temporal")
 ts_all = prepare_time_series(df_main)
 
 # ---------- 1) Prueba de estacionalidad (ADF) ----------
-st.markdown("### 1) Prueba de estacionalidad (ADF)")
+st.markdown("### 1) Prueba de estacionariedad (ADF)")
 serie_adf = ts_all.diff().dropna() if adf_on_diff else ts_all
 try:
     adf_stat, adf_p, adf_lags, adf_nobs, adf_crit, adf_icbest = adfuller(serie_adf.values, autolag="AIC")
@@ -474,7 +474,7 @@ try:
     c3.metric("Lags usados", f"{adf_lags}")
     c4.metric("Observaciones", f"{adf_nobs}")
     st.caption(f"Valores críticos: 1%={adf_crit['1%']:.3f} | 5%={adf_crit['5%']:.3f} | 10%={adf_crit['10%']:.3f}")
-    st.info("Criterio: si el **p-valor < 0.05**, se rechaza la hipótesis nula de raíz unitaria (serie estacionaria).")
+    st.info("Criterio: si el **p-valor < 0.05**, se rechaza la hipótesis nula de raíz unitaria y se concluye que la serie es estacionaria.")
 except Exception as e:
     st.warning(f"No fue posible ejecutar ADF: {e}")
 
